@@ -123,34 +123,19 @@ func resourcePostgreSQLDatabaseCreate(db *DBConnection, d *schema.ResourceData) 
 	return resourcePostgreSQLDatabaseReadImpl(db, d)
 }
 
-func createDatabase(db *DBConnection, d *schema.ResourceData) error {
+func createDatabase(db *DBConnection, d *schema.ResourceData) (err error) {
 	currentUser := db.client.config.getDatabaseUsername()
 	owner := d.Get(dbOwnerAttr).(string)
 
-	var err error
 	if owner != "" {
-		// Take a lock on db currentUser to avoid multiple database creation at the same time
-		// It can fail if they grant the same owner to current at the same time as it's not done in transaction.
-		lockTxn, err := startTransaction(db.client, "")
-		if err != nil {
-			return err
+		// Lock the connected user so concurrent creations don't race on the
+		// temporary owner grant, and grant the owner so a non-superuser can
+		// create a database owned by it.
+		release, grantErr := grantOwnerForDDL(db, owner)
+		if grantErr != nil {
+			return grantErr
 		}
-		if err := pgLockRole(lockTxn, currentUser); err != nil {
-			return err
-		}
-		defer deferredRollback(lockTxn)
-
-		// Needed in order to set the owner of the db if the connection user is not a
-		// superuser
-		ownerGranted, err := grantRoleMembership(db, owner, currentUser)
-		if err != nil {
-			return err
-		}
-		if ownerGranted {
-			defer func() {
-				_, err = revokeRoleMembership(db, owner, currentUser)
-			}()
-		}
+		defer releaseInto(&err, release)
 	}
 
 	dbName := d.Get(dbNameAttr).(string)
@@ -231,35 +216,21 @@ func createDatabase(db *DBConnection, d *schema.ResourceData) error {
 		return fmt.Errorf("error creating database %q: %w", dbName, err)
 	}
 
-	// Set err outside of the return so that the deferred revoke can override err
-	// if necessary.
-	return err
+	return nil
 }
 
-func resourcePostgreSQLDatabaseDelete(db *DBConnection, d *schema.ResourceData) error {
-	currentUser := db.client.config.getDatabaseUsername()
+func resourcePostgreSQLDatabaseDelete(db *DBConnection, d *schema.ResourceData) (err error) {
 	owner := d.Get(dbOwnerAttr).(string)
 
 	var dropWithForce string
-	var err error
 	if owner != "" {
-		lockTxn, err := startTransaction(db.client, "")
-		if err := pgLockRole(lockTxn, currentUser); err != nil {
-			return err
+		// Needed to drop a database owned by another role when the
+		// connection user is not a superuser.
+		release, grantErr := grantOwnerForDDL(db, owner)
+		if grantErr != nil {
+			return grantErr
 		}
-		defer deferredRollback(lockTxn)
-
-		// Needed in order to set the owner of the db if the connection user is not a
-		// superuser
-		ownerGranted, err := grantRoleMembership(db, owner, currentUser)
-		if err != nil {
-			return err
-		}
-		if ownerGranted {
-			defer func() {
-				_, err = revokeRoleMembership(db, owner, currentUser)
-			}()
-		}
+		defer releaseInto(&err, release)
 	}
 
 	dbName := d.Get(dbNameAttr).(string)
@@ -294,8 +265,7 @@ func resourcePostgreSQLDatabaseDelete(db *DBConnection, d *schema.ResourceData) 
 
 	d.SetId("")
 
-	// Returning err even if it's nil so defer func can modify it.
-	return err
+	return nil
 }
 
 func resourcePostgreSQLDatabaseExists(db *DBConnection, d *schema.ResourceData) (bool, error) {
@@ -450,7 +420,7 @@ func setDBName(db QueryAble, d *schema.ResourceData) error {
 	return nil
 }
 
-func setDBOwner(db *DBConnection, d *schema.ResourceData) error {
+func setDBOwner(db *DBConnection, d *schema.ResourceData) (err error) {
 	if !d.HasChange(dbOwnerAttr) {
 		return nil
 	}
@@ -459,24 +429,14 @@ func setDBOwner(db *DBConnection, d *schema.ResourceData) error {
 	if owner == "" {
 		return nil
 	}
-	currentUser := db.client.config.getDatabaseUsername()
 
-	lockTxn, err := startTransaction(db.client, "")
-	if err := pgLockRole(lockTxn, currentUser); err != nil {
-		return err
+	// Needed in order to set the owner of the db if the connection user is
+	// not a superuser.
+	release, grantErr := grantOwnerForDDL(db, owner)
+	if grantErr != nil {
+		return grantErr
 	}
-	defer deferredRollback(lockTxn)
-
-	//needed in order to set the owner of the db if the connection user is not a superuser
-	ownerGranted, err := grantRoleMembership(db, owner, currentUser)
-	if err != nil {
-		return err
-	}
-	if ownerGranted {
-		defer func() {
-			_, err = revokeRoleMembership(db, owner, currentUser)
-		}()
-	}
+	defer releaseInto(&err, release)
 
 	dbName := d.Get(dbNameAttr).(string)
 
@@ -485,10 +445,10 @@ func setDBOwner(db *DBConnection, d *schema.ResourceData) error {
 		return fmt.Errorf("error updating database OWNER: %w", err)
 	}
 
-	return err
+	return nil
 }
 
-func setAlterOwnership(db *DBConnection, d *schema.ResourceData) error {
+func setAlterOwnership(db *DBConnection, d *schema.ResourceData) (err error) {
 	if !d.HasChange(dbOwnerAttr) && !d.HasChange(dbAlterObjectOwnership) {
 		return nil
 	}
@@ -505,15 +465,18 @@ func setAlterOwnership(db *DBConnection, d *schema.ResourceData) error {
 
 	dbName := d.Get(dbNameAttr).(string)
 
-	lockTxn, err := startTransaction(db.client, dbName)
+	lockTxn, txnErr := startTransaction(db.client, dbName)
+	if txnErr != nil {
+		return txnErr
+	}
+	defer deferredRollback(lockTxn)
 	if err := pgLockRole(lockTxn, currentUser); err != nil {
 		return err
 	}
-	defer deferredRollback(lockTxn)
 
-	currentOwner, err := getDatabaseOwner(db, dbName)
-	if err != nil {
-		return fmt.Errorf("error getting current database OWNER: %w", err)
+	currentOwner, ownerErr := getDatabaseOwner(db, dbName)
+	if ownerErr != nil {
+		return fmt.Errorf("error getting current database OWNER: %w", ownerErr)
 	}
 
 	newOwner := d.Get(dbOwnerAttr).(string)
@@ -522,14 +485,15 @@ func setAlterOwnership(db *DBConnection, d *schema.ResourceData) error {
 		return nil
 	}
 
-	currentOwnerGranted, err := grantRoleMembership(db, currentOwner, currentUser)
-	if err != nil {
-		return err
+	currentOwnerGranted, grantErr := grantRoleMembership(db, currentOwner, currentUser)
+	if grantErr != nil {
+		return grantErr
 	}
 	if currentOwnerGranted {
-		defer func() {
-			_, err = revokeRoleMembership(db, currentOwner, currentUser)
-		}()
+		defer releaseInto(&err, func() error {
+			_, revokeErr := revokeRoleMembership(db, currentOwner, currentUser)
+			return revokeErr
+		})
 	}
 	sql := fmt.Sprintf("REASSIGN OWNED BY %s TO %s", pq.QuoteIdentifier(currentOwner), pq.QuoteIdentifier(newOwner))
 	if _, err := lockTxn.Exec(sql); err != nil {
