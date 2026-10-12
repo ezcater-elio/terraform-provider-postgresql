@@ -121,7 +121,7 @@ func (pgFunction *PGFunction) Parse(functionDefinition string) error {
 	args := []PGFunctionArg{}
 
 	if argsData != "" {
-		rawArgs := strings.Split(argsData, ",")
+		rawArgs := splitFunctionArgs(argsData)
 		for i := 0; i < len(rawArgs); i++ {
 			var arg PGFunctionArg
 			err := arg.Parse(rawArgs[i])
@@ -152,6 +152,34 @@ func (pgFunction *PGFunction) Parse(functionDefinition string) error {
 	}
 
 	return nil
+}
+
+// splitFunctionArgs splits a pg_get_functiondef argument list on the commas
+// that separate arguments, ignoring commas nested in parentheses or brackets
+// (defaults such as round(1.5, 2) or ARRAY[1, 2]) and inside single- or
+// double-quoted text. An escaped quote (two in a row) toggles twice, so it
+// needs no special case.
+func splitFunctionArgs(args string) []string {
+	var parts []string
+	depth, start := 0, 0
+	inSingle, inDouble := false, false
+	for i, r := range args {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case inSingle || inDouble:
+		case r == '(' || r == '[':
+			depth++
+		case r == ')' || r == ']':
+			depth--
+		case r == ',' && depth == 0:
+			parts = append(parts, args[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, args[start:])
 }
 
 func (pgFunctionArg *PGFunctionArg) Parse(functionArgDefinition string) error {

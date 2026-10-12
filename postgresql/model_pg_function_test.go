@@ -269,3 +269,34 @@ func mockFunctionResourceData(t *testing.T, obj PGFunction) *schema.ResourceData
 
 	return schema.TestResourceDataRaw(t, resourcePostgreSQLFunction().Schema, attributes)
 }
+
+// pg_get_functiondef drops type modifiers, but defaults and quoted names can
+// still contain commas; they must not split one argument into several.
+func TestPGFunctionParseArgsWithNestedCommas(t *testing.T) {
+	var functionDefinition = `
+CREATE OR REPLACE FUNCTION public.pg_func_test(num numeric DEFAULT round(1.5, 2), ids integer[] DEFAULT ARRAY[1, 2], label text DEFAULT 'a,b'::text, "a,b" integer)
+RETURNS void
+LANGUAGE plpgsql
+AS $function$
+BEGIN END;
+$function$
+	`
+
+	var pgFunction PGFunction
+	if err := pgFunction.Parse(functionDefinition); err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, []PGFunctionArg{
+		{Mode: "IN", Name: "num", Type: "numeric", Default: "round(1.5, 2)"},
+		{Mode: "IN", Name: "ids", Type: "integer[]", Default: "ARRAY[1, 2]"},
+		{Mode: "IN", Name: "label", Type: "text", Default: "'a,b'::text"},
+		{Mode: "IN", Name: `"a,b"`, Type: "integer"},
+	}, pgFunction.Args)
+}
+
+func TestSplitFunctionArgs(t *testing.T) {
+	assert.Equal(t, []string{"a int", " b text"}, splitFunctionArgs("a int, b text"))
+	assert.Equal(t, []string{"x text DEFAULT 'it''s, ok'"}, splitFunctionArgs("x text DEFAULT 'it''s, ok'"))
+	assert.Equal(t, []string{""}, splitFunctionArgs(""))
+}
