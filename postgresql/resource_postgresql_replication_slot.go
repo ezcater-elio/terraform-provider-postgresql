@@ -171,11 +171,6 @@ func generateReplicationSlotID(d *schema.ResourceData, databaseName string) stri
 	}, ".")
 }
 
-func getReplicationSlotNameFromID(ID string) string {
-	splitted := strings.Split(ID, ".")
-	return splitted[0]
-}
-
 // getDBReplicationSlotName returns database and replication slot name. If we are importing this
 // resource, they will be parsed from the resource ID (it will return an error if parsing failed)
 // otherwise they will be simply get from the state.

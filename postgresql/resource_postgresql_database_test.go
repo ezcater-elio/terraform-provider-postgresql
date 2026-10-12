@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
@@ -556,3 +557,65 @@ resource "postgresql_database" "mydb_default_owner" {
 }
 
 `
+
+// Database names are quoted identifiers, so they may contain quotes; destroy
+// must not build SQL that breaks on them.
+func TestAccPostgresqlDatabase_QuotesInName(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckPostgresqlDatabaseDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "postgresql_database" "single_quote" {
+  name = "tf_tests_db_single'quote"
+}
+
+resource "postgresql_database" "double_quote" {
+  name = "tf_tests_db_double\"quote"
+}
+`,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPostgresqlDatabaseExists("postgresql_database.single_quote"),
+					testAccCheckPostgresqlDatabaseExists("postgresql_database.double_quote"),
+					resource.TestCheckResourceAttr("postgresql_database.single_quote", "name", "tf_tests_db_single'quote"),
+					resource.TestCheckResourceAttr("postgresql_database.double_quote", "name", `tf_tests_db_double"quote`),
+				),
+			},
+		},
+	})
+}
+
+// A failed lock transaction must surface as an error, never as a nil-txn
+// panic. 127.0.0.1:1 refuses connections immediately; no Docker needed.
+func TestDatabaseOwnerOperationsFailCleanlyWithoutLockTransaction(t *testing.T) {
+	unreachable := Config{
+		Scheme:                        "postgres",
+		Host:                          "127.0.0.1",
+		Port:                          1,
+		Username:                      "tf_tests_unreachable",
+		SSLMode:                       "disable",
+		ConnectTimeoutSec:             1,
+		ConnectionRetryTimeoutSeconds: 1,
+	}
+	db := &DBConnection{client: unreachable.NewClient("postgres")}
+
+	cases := map[string]func(*DBConnection, *schema.ResourceData) error{
+		"delete":                 resourcePostgreSQLDatabaseDelete,
+		"set owner":              setDBOwner,
+		"alter object ownership": setAlterOwnership,
+	}
+	for name, operation := range cases {
+		t.Run(name, func(t *testing.T) {
+			d := schema.TestResourceDataRaw(t, resourcePostgreSQLDatabase().Schema, map[string]any{
+				dbNameAttr:             "tf_tests_unreachable",
+				dbOwnerAttr:            "tf_tests_owner",
+				dbAlterObjectOwnership: true,
+			})
+			if err := operation(db, d); err == nil {
+				t.Fatal("expected an error when the lock transaction cannot be opened, got nil")
+			}
+		})
+	}
+}

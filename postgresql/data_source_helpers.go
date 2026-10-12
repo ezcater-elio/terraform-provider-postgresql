@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/lib/pq"
 )
 
 const (
@@ -34,7 +35,7 @@ func applyPatternMatchingToQuery(patternMatchingTarget string, d *schema.Resourc
 		filters = append(filters, generatePatternMatchingString(patternMatchingTarget, notLikePatternQuery, generatePatternArrayString(notLikeAllPatterns, queryArrayKeywordAll)))
 	}
 	if regexPattern != "" {
-		filters = append(filters, generatePatternMatchingString(patternMatchingTarget, regexPatternQuery, fmt.Sprintf("'%s'", regexPattern)))
+		filters = append(filters, generatePatternMatchingString(patternMatchingTarget, regexPatternQuery, pq.QuoteLiteral(regexPattern)))
 	}
 
 	return filters
@@ -59,7 +60,7 @@ func generatePatternArrayString(patterns []any, queryArrayKeyword string) string
 	formattedPatterns := []string{}
 
 	for _, pattern := range patterns {
-		formattedPatterns = append(formattedPatterns, fmt.Sprintf("'%s'", pattern.(string)))
+		formattedPatterns = append(formattedPatterns, pq.QuoteLiteral(pattern.(string)))
 	}
 	return fmt.Sprintf("%s (array[%s])", queryArrayKeyword, strings.Join(formattedPatterns, ","))
 }

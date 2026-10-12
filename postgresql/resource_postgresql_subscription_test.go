@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
@@ -28,7 +29,8 @@ func testAccCheckPostgresqlSubscriptionDestroy(s *terraform.State) error {
 		}
 		defer deferredRollback(txn)
 
-		exists, err := checkSubscriptionExists(txn, getSubscriptionNameFromID(rs.Primary.ID))
+		subName := rs.Primary.Attributes["name"]
+		exists, err := checkSubscriptionExists(txn, subName)
 
 		if err != nil {
 			return fmt.Errorf("error checking subscription %s", err)
@@ -38,7 +40,7 @@ func testAccCheckPostgresqlSubscriptionDestroy(s *terraform.State) error {
 			return fmt.Errorf("Subscription still exists after destroy")
 		}
 
-		streams, err := checkSubscriptionStreams(txn, getSubscriptionNameFromID(rs.Primary.ID))
+		streams, err := checkSubscriptionStreams(txn, subName)
 
 		if err != nil {
 			return fmt.Errorf("error checking subscription %s", err)
@@ -315,4 +317,34 @@ func TestAccPostgresqlSubscription_CustomSlotName(t *testing.T) {
 	},
 	)
 	coolDown()
+}
+
+// Read must clear the ID of a subscription that no longer exists. The Exists
+// callback hides this today; Read is called directly to pin it down.
+func TestAccPostgresqlSubscription_ReadMissing(t *testing.T) {
+	skipIfNotAcc(t)
+	testAccPreCheck(t)
+	testCheckCompatibleVersion(t, featurePublication)
+
+	client := testAccProvider.Meta().(*Client)
+	db, err := client.Connect()
+	if err != nil {
+		t.Fatalf("could not connect: %v", err)
+	}
+
+	const subName = "tf_tests_missing_sub"
+	d := schema.TestResourceDataRaw(t, resourcePostgreSQLSubscription().Schema, map[string]any{
+		"name":         subName,
+		"database":     client.databaseName,
+		"conninfo":     "host=localhost",
+		"publications": []any{"tf_tests_pub"},
+	})
+	d.SetId(client.databaseName + "." + subName)
+
+	if err := resourcePostgreSQLSubscriptionReadImpl(db, d); err != nil {
+		t.Fatalf("reading a missing subscription returned an error: %v", err)
+	}
+	if d.Id() != "" {
+		t.Fatalf("expected the ID to be cleared, got %q", d.Id())
+	}
 }

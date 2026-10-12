@@ -7,6 +7,8 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	acl "github.com/sean-/postgresql-acl"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestAccPostgresqlSchema_Basic(t *testing.T) {
@@ -301,7 +303,7 @@ func testAccCheckPostgresqlSchemaDestroy(s *terraform.State) error {
 		}
 		defer deferredRollback(txn)
 
-		exists, err := checkSchemaExists(txn, getExtensionNameFromID(rs.Primary.ID))
+		exists, err := checkSchemaExists(txn, rs.Primary.Attributes[schemaNameAttr])
 
 		if err != nil {
 			return fmt.Errorf("error checking schema %s", err)
@@ -597,3 +599,118 @@ resource "postgresql_schema" "test4" {
   }
 }
 `
+
+// Revoking a tracked policy outside Terraform must show up in the next plan.
+func TestAccPostgresqlSchema_PolicyDrift(t *testing.T) {
+	skipIfNotAcc(t)
+	config := getTestConfig(t)
+	dsn := config.connStr("postgres")
+
+	hcl := `
+resource "postgresql_role" "drift" {
+  name = "tf_tests_policy_drift"
+}
+
+resource "postgresql_schema" "drift" {
+  name = "tf_tests_policy_drift"
+
+  policy {
+    usage = true
+    role  = postgresql_role.drift.name
+  }
+}
+`
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckPostgresqlSchemaDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: hcl,
+				Check:  resource.TestCheckResourceAttr("postgresql_schema.drift", "policy.#", "1"),
+			},
+			{
+				PreConfig: func() {
+					dbExecute(t, dsn, "REVOKE USAGE ON SCHEMA tf_tests_policy_drift FROM tf_tests_policy_drift")
+				},
+				Config:             hcl,
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+			},
+		},
+	})
+}
+
+func schemaPolicy(role string, flags ...string) map[string]any {
+	policy := map[string]any{
+		schemaPolicyRoleAttr:            role,
+		schemaPolicyCreateAttr:          false,
+		schemaPolicyCreateWithGrantAttr: false,
+		schemaPolicyUsageAttr:           false,
+		schemaPolicyUsageWithGrantAttr:  false,
+	}
+	for _, flag := range flags {
+		policy[flag] = true
+	}
+	return policy
+}
+
+func schemaACL(privileges, grantOptions acl.Privileges) acl.Schema {
+	return acl.Schema{ACL: acl.ACL{Privileges: privileges, GrantOptions: grantOptions}}
+}
+
+func TestSchemaPolicyKey(t *testing.T) {
+	assert.Equal(t, schemaPolicyKey("MyRole"), schemaPolicyKey(`"MyRole"`))
+	assert.Equal(t, "", schemaPolicyKey(""))
+	assert.Equal(t, schemaPolicyKey("a\"b"), schemaPolicyKey(`"a""b"`))
+}
+
+func TestRefreshSchemaPoliciesKeepsEquivalentEntries(t *testing.T) {
+	prior := []any{
+		schemaPolicy("r", schemaPolicyCreateAttr),
+		schemaPolicy("r", schemaPolicyCreateWithGrantAttr, schemaPolicyUsageWithGrantAttr),
+	}
+	actual := map[string]acl.Schema{"r": schemaACL(acl.Create|acl.Usage, acl.Create|acl.Usage)}
+
+	assert.Equal(t, prior, refreshSchemaPolicies(prior, actual, ""))
+}
+
+func TestRefreshSchemaPoliciesReportsDrift(t *testing.T) {
+	prior := []any{schemaPolicy("MyRole", schemaPolicyCreateAttr, schemaPolicyUsageAttr)}
+	actual := map[string]acl.Schema{"myrole": schemaACL(acl.Usage, 0)}
+
+	assert.Equal(t,
+		[]any{schemaPolicy("MyRole", schemaPolicyUsageAttr)},
+		refreshSchemaPolicies(prior, actual, ""),
+	)
+}
+
+func TestRefreshSchemaPoliciesDropsMissingAndIgnoresUntracked(t *testing.T) {
+	prior := []any{schemaPolicy("", schemaPolicyUsageAttr)}
+	actual := map[string]acl.Schema{"other": schemaACL(acl.Create, 0)}
+
+	assert.Equal(t, []any{}, refreshSchemaPolicies(prior, actual, ""))
+}
+
+func TestRefreshSchemaPoliciesKeepsTrackedRoleWithNoPrivileges(t *testing.T) {
+	prior := []any{schemaPolicy("r")}
+
+	assert.Equal(t, prior, refreshSchemaPolicies(prior, map[string]acl.Schema{}, ""))
+}
+
+func TestRefreshSchemaPoliciesAcceptsSubsetForOwner(t *testing.T) {
+	prior := []any{schemaPolicy("Owner", schemaPolicyUsageAttr)}
+	actual := map[string]acl.Schema{"owner": schemaACL(acl.Create|acl.Usage, 0)}
+
+	assert.Equal(t, prior, refreshSchemaPolicies(prior, actual, "owner"))
+}
+
+func TestRefreshSchemaPoliciesRebuildsSubsetForNonOwner(t *testing.T) {
+	prior := []any{schemaPolicy("r", schemaPolicyUsageAttr)}
+	actual := map[string]acl.Schema{"r": schemaACL(acl.Create|acl.Usage, 0)}
+
+	assert.Equal(t,
+		[]any{schemaPolicy("r", schemaPolicyCreateAttr, schemaPolicyUsageAttr)},
+		refreshSchemaPolicies(prior, actual, "owner"),
+	)
+}

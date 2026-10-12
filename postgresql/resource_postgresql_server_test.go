@@ -495,3 +495,42 @@ resource "postgresql_server" "myserver_postgres" {
 	depends_on = [postgresql_extension.ext_postgres_fdw]
 }
 `
+
+// pg_foreign_server stores options as "key=value"; a value containing '='
+// must round-trip unchanged.
+func TestAccPostgresqlServer_OptionValueWithEquals(t *testing.T) {
+	skipIfNotAcc(t)
+	config := getTestConfig(t)
+	dsn := config.connStr("postgres")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+			testCheckCompatibleVersion(t, featureServer)
+			testSuperuserPreCheck(t)
+			dbExecute(t, dsn, "CREATE FOREIGN DATA WRAPPER tf_tests_fdw")
+			t.Cleanup(func() {
+				dbExecute(t, dsn, "DROP FOREIGN DATA WRAPPER IF EXISTS tf_tests_fdw CASCADE")
+			})
+		},
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckPostgresqlServerDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "postgresql_server" "equals" {
+  server_name = "tf_tests_equals"
+  fdw_name    = "tf_tests_fdw"
+  options = {
+    conninfo = "host=a port=5432"
+  }
+}
+`,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPostgresqlServerExists("postgresql_server.equals"),
+					resource.TestCheckResourceAttr("postgresql_server.equals", "options.conninfo", "host=a port=5432"),
+				),
+			},
+		},
+	})
+}

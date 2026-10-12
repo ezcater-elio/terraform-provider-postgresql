@@ -58,7 +58,7 @@ func testAccCheckPostgresqlExtensionDestroy(s *terraform.State) error {
 		}
 		defer deferredRollback(txn)
 
-		exists, err := checkExtensionExists(txn, getExtensionNameFromID(rs.Primary.ID))
+		exists, err := checkExtensionExists(txn, rs.Primary.Attributes[extNameAttr])
 
 		if err != nil {
 			return fmt.Errorf("error checking extension %s", err)

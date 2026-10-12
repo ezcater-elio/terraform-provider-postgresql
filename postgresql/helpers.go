@@ -629,6 +629,48 @@ func pgLockDatabase(txn *sql.Tx, database string) error {
 	return nil
 }
 
+// grantOwnerForDDL takes the advisory lock on the connected user and, when
+// needed, temporarily grants it membership in owner so it can run DDL on that
+// role's behalf (required when the provider user is not a superuser).
+// Callers must call release, which revokes the membership if it was granted
+// and ends the lock transaction; see releaseInto.
+func grantOwnerForDDL(db *DBConnection, owner string) (release func() error, err error) {
+	currentUser := db.client.config.getDatabaseUsername()
+
+	lockTxn, err := startTransaction(db.client, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := pgLockRole(lockTxn, currentUser); err != nil {
+		deferredRollback(lockTxn)
+		return nil, err
+	}
+
+	ownerGranted, err := grantRoleMembership(db, owner, currentUser)
+	if err != nil {
+		deferredRollback(lockTxn)
+		return nil, err
+	}
+
+	return func() error {
+		defer deferredRollback(lockTxn)
+		if !ownerGranted {
+			return nil
+		}
+		_, revokeErr := revokeRoleMembership(db, owner, currentUser)
+		return revokeErr
+	}, nil
+}
+
+// releaseInto runs release and stores its error in *err unless *err already
+// holds one. Use it as `defer releaseInto(&err, release)` in a function with
+// a named error result, so cleanup failures are not silently dropped.
+func releaseInto(err *error, release func() error) {
+	if releaseErr := release(); releaseErr != nil && *err == nil {
+		*err = releaseErr
+	}
+}
+
 func arrayDifference(a, b []any) (diff []any) {
 	m := make(map[any]bool)
 

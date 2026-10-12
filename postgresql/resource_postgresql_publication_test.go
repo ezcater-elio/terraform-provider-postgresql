@@ -28,7 +28,7 @@ func testAccCheckPostgresqlPublicationDestroy(s *terraform.State) error {
 		}
 		defer deferredRollback(txn)
 
-		exists, err := checkPublicationExists(txn, getPublicationNameFromID(rs.Primary.ID))
+		exists, err := checkPublicationExists(txn, rs.Primary.Attributes[pubNameAttr])
 
 		if err != nil {
 			return fmt.Errorf("error checking publication %s", err)
@@ -814,6 +814,49 @@ resource "postgresql_publication" "test" {
 			{
 				Config:      testAccPostgresqlPublicationDuplicateKeys,
 				ExpectError: regexp.MustCompile("'insert' is duplicated for attribute `tables`")},
+		},
+	})
+}
+
+// Unquoted DDL folded mixed-case names to lower case, so the publication
+// (and its owner) could not be found again by their configured names.
+func TestAccPostgresqlPublication_MixedCaseNames(t *testing.T) {
+	skipIfNotAcc(t)
+
+	dbSuffix, teardown := setupTestDatabase(t, true, true)
+	defer teardown()
+
+	dbName, _ := getTestDBNames(dbSuffix)
+
+	config := fmt.Sprintf(`
+resource "postgresql_role" "owner" {
+	name = "TfTestsPubOwner"
+}
+
+resource "postgresql_publication" "test" {
+	name     = "TfTestsMyPub"
+	database = "%s"
+	owner    = postgresql_role.owner.name
+}
+`, dbName)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+			testCheckCompatibleVersion(t, featurePublication)
+			testSuperuserPreCheck(t)
+		},
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckPostgresqlPublicationDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPostgresqlPublicationExists("postgresql_publication.test"),
+					resource.TestCheckResourceAttr("postgresql_publication.test", "name", "TfTestsMyPub"),
+					resource.TestCheckResourceAttr("postgresql_publication.test", "owner", "TfTestsPubOwner"),
+				),
+			},
 		},
 	})
 }
