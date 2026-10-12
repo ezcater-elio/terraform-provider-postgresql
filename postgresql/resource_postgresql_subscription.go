@@ -126,20 +126,20 @@ func resourcePostgreSQLSubscriptionReadImpl(db *DBConnection, d *schema.Resource
 
 	var subExists bool
 	queryExists := "SELECT TRUE FROM pg_catalog.pg_stat_subscription WHERE subname = $1"
-	err = txn.QueryRow(queryExists, pqQuoteLiteral(subName)).Scan(&subExists)
-	if err != nil {
-		return fmt.Errorf("failed to check subscription: %w", err)
-	}
-
-	if !subExists {
+	// A missing subscription yields no row, so QueryRow returns ErrNoRows:
+	// treat that as gone and clear the ID; anything else is a real error.
+	switch err = txn.QueryRow(queryExists, subName).Scan(&subExists); {
+	case err == sql.ErrNoRows:
 		log.Printf("[WARN] PostgreSQL Subscription (%s) not found for database %s", subName, databaseName)
 		d.SetId("")
 		return nil
+	case err != nil:
+		return fmt.Errorf("failed to check subscription: %w", err)
 	}
 
 	// pg_subscription requires superuser permissions, it is okay to fail here
 	query := "SELECT subconninfo, subpublications, subslotname FROM pg_catalog.pg_subscription WHERE subname = $1"
-	err = txn.QueryRow(query, pqQuoteLiteral(subName)).Scan(&connInfo, pq.Array(&publications), &slotName)
+	err = txn.QueryRow(query, subName).Scan(&connInfo, pq.Array(&publications), &slotName)
 
 	if err != nil {
 		// we already checked that the subscription exists
@@ -232,7 +232,7 @@ func resourcePostgreSQLSubscriptionExists(db *DBConnection, d *schema.ResourceDa
 	defer deferredRollback(txn)
 
 	query := "SELECT subname from pg_catalog.pg_stat_subscription WHERE subname = $1"
-	err = txn.QueryRow(query, pqQuoteLiteral(subName)).Scan(&subName)
+	err = txn.QueryRow(query, subName).Scan(&subName)
 
 	switch {
 	case err == sql.ErrNoRows:
