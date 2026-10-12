@@ -110,17 +110,11 @@ func resourcePostgreSQLSecurityLabelReadImpl(db *DBConnection, d *schema.Resourc
 	objectName := d.Get(securityLabelObjectNameAttr).(string)
 	provider := d.Get(securityLabelProviderAttr).(string)
 
-	txn, err := startTransaction(db.client, "")
-	if err != nil {
-		return err
-	}
-	defer deferredRollback(txn)
-
 	query := "SELECT objtype, provider, objname, label FROM pg_seclabels WHERE objtype = $1 and objname = $2 and provider = $3"
 	row := db.QueryRow(query, objectType, quoteIdentifier(objectName), quoteIdentifier(provider))
 
 	var label, newObjectName, newProvider string
-	err = row.Scan(&objectType, &newProvider, &newObjectName, &label)
+	err := row.Scan(&objectType, &newProvider, &newObjectName, &label)
 	switch {
 	case err == sql.ErrNoRows:
 		log.Printf("[WARN] PostgreSQL security label for (%s '%s') with provider %s not found", objectType, objectName, provider)
@@ -164,7 +158,7 @@ func resourcePostgreSQLSecurityLabelDelete(db *DBConnection, d *schema.ResourceD
 }
 
 func resourcePostgreSQLSecurityLabelUpdate(db *DBConnection, d *schema.ResourceData) error {
-	if !db.featureSupported(featureServer) {
+	if !db.featureSupported(featureSecurityLabel) {
 		return fmt.Errorf(
 			"security Label is not supported for this Postgres version (%s)",
 			db.version,

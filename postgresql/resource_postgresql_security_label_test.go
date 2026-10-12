@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blang/semver"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
@@ -212,3 +214,20 @@ resource "postgresql_security_label" "test_label" {
   label          = "top secret"
 }
 `
+
+// SECURITY LABEL needs PG 11+. Update must refuse on PG 10 before touching
+// the database (db.DB is nil here, so any query would panic).
+func TestSecurityLabelUpdateRequiresSecurityLabelFeature(t *testing.T) {
+	db := &DBConnection{version: semver.MustParse("10.0.0")}
+	d := schema.TestResourceDataRaw(t, resourcePostgreSQLSecurityLabel().Schema, map[string]any{
+		securityLabelObjectTypeAttr: "role",
+		securityLabelObjectNameAttr: "tf_tests_role",
+		securityLabelProviderAttr:   "dummy",
+		securityLabelLabelAttr:      "secret",
+	})
+
+	err := resourcePostgreSQLSecurityLabelUpdate(db, d)
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("expected a 'not supported' error on PG 10, got %v", err)
+	}
+}
