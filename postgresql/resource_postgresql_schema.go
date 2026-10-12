@@ -206,7 +206,7 @@ func createSchema(db *DBConnection, txn *sql.Tx, d *schema.ResourceData) error {
 			policyMap := policyRaw.(map[string]any)
 			rolePolicy := schemaPolicyToACL(policyMap)
 
-			roleKey := RoleKey(strings.ToLower(rolePolicy.Role))
+			roleKey := RoleKey(schemaPolicyKey(rolePolicy.Role))
 			if existingRolePolicy, ok := schemaPolicies[roleKey]; ok {
 				schemaPolicies[roleKey] = existingRolePolicy.Merge(rolePolicy)
 			} else {
@@ -331,8 +331,7 @@ func resourcePostgreSQLSchemaReadImpl(db *DBConnection, d *schema.ResourceData) 
 	case err != nil:
 		return fmt.Errorf("error reading schema: %w", err)
 	default:
-		type RoleKey string
-		schemaPolicies := make(map[RoleKey]acl.Schema, len(schemaACLs))
+		schemaPolicies := make(map[string]acl.Schema, len(schemaACLs))
 		for _, aclStr := range schemaACLs {
 			aclItem, err := acl.Parse(aclStr)
 			if err != nil {
@@ -344,19 +343,18 @@ func resourcePostgreSQLSchemaReadImpl(db *DBConnection, d *schema.ResourceData) 
 				return fmt.Errorf("invalid perms for schema: %w", err)
 			}
 
-			roleKey := RoleKey(strings.ToLower(schemaACL.Role))
-			var mergedPolicy acl.Schema
-			if existingRolePolicy, ok := schemaPolicies[roleKey]; ok {
-				mergedPolicy = existingRolePolicy.Merge(schemaACL)
+			key := schemaPolicyKey(schemaACL.Role)
+			if existing, ok := schemaPolicies[key]; ok {
+				schemaPolicies[key] = existing.Merge(schemaACL)
 			} else {
-				mergedPolicy = schemaACL
+				schemaPolicies[key] = schemaACL
 			}
-			schemaPolicies[roleKey] = mergedPolicy
 		}
 
 		d.Set(schemaNameAttr, schemaName)
 		d.Set(schemaOwnerAttr, schemaOwner)
 		d.Set(schemaDatabaseAttr, database)
+		d.Set(schemaPolicyAttr, refreshSchemaPolicies(d.Get(schemaPolicyAttr).(*schema.Set).List(), schemaPolicies, schemaOwner))
 		d.SetId(generateSchemaID(d, database))
 
 		return nil
@@ -590,6 +588,88 @@ func schemaPolicyToACL(policyMap map[string]any) acl.Schema {
 	}
 
 	return rolePolicy
+}
+
+// schemaPolicyKey normalises a role name for matching policies to aclitems:
+// acl.Parse keeps quotes around mixed-case names ("MyRole"), and policies are
+// matched case-insensitively. "" is PUBLIC. A quoted name has its outer quotes
+// removed and embedded "" un-doubled.
+func schemaPolicyKey(role string) string {
+	if len(role) >= 2 && strings.HasPrefix(role, `"`) && strings.HasSuffix(role, `"`) {
+		role = strings.ReplaceAll(role[1:len(role)-1], `""`, `"`)
+	}
+	return strings.ToLower(role)
+}
+
+// refreshSchemaPolicies returns the policies to store for the roles already
+// tracked in prior. A tracked role keeps its prior entries when they grant
+// exactly what the database grants it, so equivalent configs (for example a
+// role split across create and create_with_grant blocks) show no diff.
+// Otherwise its entries are replaced by one entry built from actual, or
+// dropped when the role has no aclitem, unless it was tracked with no
+// privileges at all. Roles absent from prior are ignored. The schema owner
+// also keeps its prior entries when they are a subset of its actual
+// privileges, because PostgreSQL records the owner's implicit CREATE and USAGE
+// once nspacl is non-null. actual is keyed by schemaPolicyKey.
+func refreshSchemaPolicies(prior []any, actual map[string]acl.Schema, owner string) []any {
+	order, merged, entries := groupSchemaPolicies(prior)
+
+	ownerKey := schemaPolicyKey(owner)
+	refreshed := []any{}
+	for _, key := range order {
+		current, found := actual[key]
+		switch {
+		case !found:
+			if merged[key].Privileges == 0 {
+				refreshed = append(refreshed, entries[key]...)
+			}
+		case schemaPolicyMatches(merged[key], current, key == ownerKey):
+			refreshed = append(refreshed, entries[key]...)
+		default:
+			refreshed = append(refreshed, schemaACLToPolicy(merged[key].Role, current))
+		}
+	}
+	return refreshed
+}
+
+// schemaPolicyMatches reports whether the tracked privileges equal the actual
+// ones, or, for the schema owner, are a subset of them.
+func schemaPolicyMatches(tracked, actual acl.Schema, subsetOK bool) bool {
+	if subsetOK {
+		return tracked.Privileges&^actual.Privileges == 0 && tracked.GrantOptions&^actual.GrantOptions == 0
+	}
+	return tracked.Privileges == actual.Privileges && tracked.GrantOptions == actual.GrantOptions
+}
+
+// groupSchemaPolicies groups prior policies by role key, preserving first-seen
+// order, and merges each role's entries into a single acl.Schema.
+func groupSchemaPolicies(prior []any) (order []string, merged map[string]acl.Schema, entries map[string][]any) {
+	merged = map[string]acl.Schema{}
+	entries = map[string][]any{}
+	for _, raw := range prior {
+		policy := raw.(map[string]any)
+		rolePolicy := schemaPolicyToACL(policy)
+		key := schemaPolicyKey(rolePolicy.Role)
+		if existing, ok := merged[key]; ok {
+			merged[key] = existing.Merge(rolePolicy)
+		} else {
+			merged[key] = rolePolicy
+			order = append(order, key)
+		}
+		entries[key] = append(entries[key], policy)
+	}
+	return order, merged, entries
+}
+
+// schemaACLToPolicy converts an aclitem back to a policy block for role.
+func schemaACLToPolicy(role string, s acl.Schema) map[string]any {
+	return map[string]any{
+		schemaPolicyRoleAttr:            role,
+		schemaPolicyCreateAttr:          s.GetPrivilege(acl.Create) && !s.GetGrantOption(acl.Create),
+		schemaPolicyCreateWithGrantAttr: s.GetGrantOption(acl.Create),
+		schemaPolicyUsageAttr:           s.GetPrivilege(acl.Usage) && !s.GetGrantOption(acl.Usage),
+		schemaPolicyUsageWithGrantAttr:  s.GetGrantOption(acl.Usage),
+	}
 }
 
 func generateSchemaID(d *schema.ResourceData, databaseName string) string {
