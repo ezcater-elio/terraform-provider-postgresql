@@ -54,7 +54,7 @@ func testAccCheckPostgresqlReplicationSlotDestroy(s *terraform.State) error {
 		}
 		defer deferredRollback(txn)
 
-		exists, err := checkReplicationSlotExists(txn, getReplicationSlotNameFromID(rs.Primary.ID))
+		exists, err := checkReplicationSlotExists(txn, rs.Primary.Attributes["name"])
 
 		if err != nil {
 			return fmt.Errorf("error checking replication slot %s", err)

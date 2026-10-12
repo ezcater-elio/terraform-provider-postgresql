@@ -301,7 +301,7 @@ func testAccCheckPostgresqlSchemaDestroy(s *terraform.State) error {
 		}
 		defer deferredRollback(txn)
 
-		exists, err := checkSchemaExists(txn, getExtensionNameFromID(rs.Primary.ID))
+		exists, err := checkSchemaExists(txn, rs.Primary.Attributes[schemaNameAttr])
 
 		if err != nil {
 			return fmt.Errorf("error checking schema %s", err)

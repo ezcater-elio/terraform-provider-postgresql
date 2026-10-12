@@ -28,7 +28,8 @@ func testAccCheckPostgresqlSubscriptionDestroy(s *terraform.State) error {
 		}
 		defer deferredRollback(txn)
 
-		exists, err := checkSubscriptionExists(txn, getSubscriptionNameFromID(rs.Primary.ID))
+		subName := rs.Primary.Attributes["name"]
+		exists, err := checkSubscriptionExists(txn, subName)
 
 		if err != nil {
 			return fmt.Errorf("error checking subscription %s", err)
@@ -38,7 +39,7 @@ func testAccCheckPostgresqlSubscriptionDestroy(s *terraform.State) error {
 			return fmt.Errorf("Subscription still exists after destroy")
 		}
 
-		streams, err := checkSubscriptionStreams(txn, getSubscriptionNameFromID(rs.Primary.ID))
+		streams, err := checkSubscriptionStreams(txn, subName)
 
 		if err != nil {
 			return fmt.Errorf("error checking subscription %s", err)

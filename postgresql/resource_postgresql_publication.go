@@ -572,8 +572,3 @@ func getDBPublicationName(d *schema.ResourceData, client *Client) (string, strin
 	}
 	return database, PublicationName, nil
 }
-
-func getPublicationNameFromID(ID string) string {
-	splitted := strings.Split(ID, ".")
-	return splitted[0]
-}

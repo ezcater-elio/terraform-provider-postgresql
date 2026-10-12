@@ -332,11 +332,6 @@ func generateExtensionID(d *schema.ResourceData, databaseName string) string {
 	}, ".")
 }
 
-func getExtensionNameFromID(ID string) string {
-	splitted := strings.Split(ID, ".")
-	return splitted[0]
-}
-
 // getDBExtName returns database and extension name. If we are importing this resource, they will be parsed
 // from the resource ID (it will return an error if parsing failed) otherwise they will be simply
 // get from the state.

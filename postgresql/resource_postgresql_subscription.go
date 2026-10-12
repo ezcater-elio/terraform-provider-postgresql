@@ -329,8 +329,3 @@ func getOptionalParameters(d *schema.ResourceData) string {
 	returnValue = fmt.Sprintf(parameterSQLTemplate, strings.Join(params, ", "))
 	return returnValue
 }
-
-func getSubscriptionNameFromID(ID string) string {
-	splitted := strings.Split(ID, ".")
-	return splitted[0]
-}

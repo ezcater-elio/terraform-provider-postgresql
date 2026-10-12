@@ -28,7 +28,7 @@ func testAccCheckPostgresqlPublicationDestroy(s *terraform.State) error {
 		}
 		defer deferredRollback(txn)
 
-		exists, err := checkPublicationExists(txn, getPublicationNameFromID(rs.Primary.ID))
+		exists, err := checkPublicationExists(txn, rs.Primary.Attributes[pubNameAttr])
 
 		if err != nil {
 			return fmt.Errorf("error checking publication %s", err)
