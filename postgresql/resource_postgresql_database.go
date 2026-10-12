@@ -636,8 +636,8 @@ func terminateBConnections(db *DBConnection, dbName string) error {
 	if db.featureSupported(featurePid) {
 		pid = "pid"
 	}
-	terminateSql = fmt.Sprintf("SELECT pg_terminate_backend(%s) FROM pg_stat_activity WHERE datname = '%s' AND %s <> pg_backend_pid()", pid, dbName, pid)
-	if _, err := db.Exec(terminateSql); err != nil {
+	terminateSql = fmt.Sprintf("SELECT pg_terminate_backend(%s) FROM pg_stat_activity WHERE datname = $1 AND %s <> pg_backend_pid()", pid, pid)
+	if _, err := db.Exec(terminateSql, dbName); err != nil {
 		return fmt.Errorf("error terminating database connections: %w", err)
 	}
 

@@ -556,3 +556,32 @@ resource "postgresql_database" "mydb_default_owner" {
 }
 
 `
+
+// Database names are quoted identifiers, so they may contain quotes; destroy
+// must not build SQL that breaks on them.
+func TestAccPostgresqlDatabase_QuotesInName(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckPostgresqlDatabaseDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "postgresql_database" "single_quote" {
+  name = "tf_tests_db_single'quote"
+}
+
+resource "postgresql_database" "double_quote" {
+  name = "tf_tests_db_double\"quote"
+}
+`,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPostgresqlDatabaseExists("postgresql_database.single_quote"),
+					testAccCheckPostgresqlDatabaseExists("postgresql_database.double_quote"),
+					resource.TestCheckResourceAttr("postgresql_database.single_quote", "name", "tf_tests_db_single'quote"),
+					resource.TestCheckResourceAttr("postgresql_database.double_quote", "name", `tf_tests_db_double"quote`),
+				),
+			},
+		},
+	})
+}
